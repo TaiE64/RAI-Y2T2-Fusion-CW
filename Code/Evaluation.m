@@ -1,6 +1,6 @@
 clear;clc;
-load('task2_5.mat');                 % Load Ground Truth data
-Pred = load('Task2_5_Estimation.mat');       % Load EKF estimated results
+load('C:\Users\33582\Desktop\OptimizationCW\trainingData\task1_5.mat');                 % Load Ground Truth data
+Pred = load('C:\Users\33582\Desktop\OptimizationCW\EKF_Estimation_Data\Task1_5_Estimation.mat');       % Load EKF estimated results
 
 % Extract GT position and yaw
 time    = out.GT_time.time;
@@ -13,8 +13,8 @@ eul    = eulerd(GT_q, 'ZYX', 'frame');
 GT_yaw = unwrap(deg2rad(eul(:,1)) + pi);  % Get yaw angle in radians
 
 % Extract EKF estimated position and yaw
-Pred_pos = Pred.x_est(:,1:2);
-Pred_yaw = Pred.x_est(:,5);
+Pred_pos = Pred.X_Est(:,1:2);
+Pred_yaw = Pred.X_Est(:,3);
 
 % Combine into [x, y, yaw] matrices
 gt  = [GT_pos, GT_yaw];
@@ -40,7 +40,8 @@ function compare_xyyaw_trajectories(est, gt)
     % Plot error metrics
     figure;
     ax = plot(mtrics, "absolute-translation");
-
+    maxError = mtrics.AbsoluteRMSE(1);  % 提取平移误差最大值
+    disp(['Max Error: ', num2str(maxError)]);
     disp('--- Debug Info: compareTrajectories executed successfully. ---');
 end
 

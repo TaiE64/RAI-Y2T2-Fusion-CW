@@ -2,7 +2,7 @@ clc; clear;
 
 %% === Load Data and Calibration Parameters ===
 load('calibration_params.mat');      % Contains gyro_bias, accel_bias, tof_bias
-load('C:\Users\33582\Desktop\OptimizationCW\trainingData\task2_1.mat');                 % Contains the 'out' structure
+load('C:\Users\33582\Desktop\OptimizationCW\trainingData\task2_3.mat');                 % Contains the 'out' structure
 
 %% === Extract Sensor Data ===
 gyro  = squeeze(out.Sensor_GYRO.signals.values)';    % [N x 3]
@@ -28,7 +28,6 @@ init_rot = GT_yaw(1);
 %% === Bias Correction ===
 gyro_calibrated  = gyro - calibration_params.gyro_bias;
 accel_calibrated = accel - calibration_params.accel_bias;
-calibration_params.tof_bias(:, [1 3]) = calibration_params.tof_bias(:, [3 1]);
 tof_calibrated   = tof_data - calibration_params.tof_bias;
 
 %% === EKF Initialization ===
@@ -40,7 +39,7 @@ P = diag([0.01, 0.01, 0.01, 0.01, 0]);        % Initial covariance
 Q = diag([0.0001, 0.0001, 0.001, 0.001, 0]);      % Process noise
 R = eye(3) * 5;                                   % ToF measurement noise
 
-[x_est, P_est, a_world_corrected] = EKF(x_init, P, time, ...
+[X_Est, P_est, a_world_corrected] = EKF(x_init, P, time, ...
     tof_calibrated, gyro_calibrated, accel_calibrated, Q, R, 6);
 
 %% === Visualization ===
@@ -49,7 +48,7 @@ figure;
 % 1. XY Trajectory
 subplot(3,2,1);
 plot(GT_pos(:,1), GT_pos(:,2), 'g--', 'LineWidth', 2); hold on;
-plot(x_est(:,1), x_est(:,2), 'r-', 'LineWidth', 1.5);
+plot(X_Est(:,1), X_Est(:,2), 'r-', 'LineWidth', 1.5);
 legend('Ground Truth', 'EKF Estimate');
 xlabel('X [m]'); ylabel('Y [m]');
 title('Trajectory with EKF Fusion');
@@ -57,7 +56,7 @@ axis equal; grid on;
 
 % 2. Yaw Comparison
 subplot(3,2,2);
-plot(time, x_est(:,5), 'r-', 'LineWidth', 1.2); hold on;
+plot(time, X_Est(:,5), 'r-', 'LineWidth', 1.2); hold on;
 plot(time, GT_yaw, 'b--', 'LineWidth', 1.2);
 xlabel('Time [s]'); ylabel('Yaw [rad]');
 legend('Estimated', 'Ground Truth');
@@ -66,22 +65,22 @@ grid on;
 
 % 3. X-axis Velocity
 subplot(3,2,3);
-plot(time, x_est(:,3), 'b-', 'LineWidth', 1.2);
+plot(time, X_Est(:,3), 'b-', 'LineWidth', 1.2);
 xlabel('Time [s]'); ylabel('X-axis Velocity [m/s]');
 title('X-axis Velocity from EKF');
 grid on;
 
 % 4. Y-axis Velocity
 subplot(3,2,4);
-plot(time, x_est(:,4), 'r-', 'LineWidth', 1.5);
+plot(time, X_Est(:,4), 'r-', 'LineWidth', 1.5);
 xlabel('Time [s]'); ylabel('Y-axis Velocity [m/s]');
 title('Y-axis Velocity from EKF');
 grid on;
 
 % 5. Estimated Position over Time
 subplot(3,2,5);
-plot(time, x_est(:,1), 'b-', 'LineWidth', 1.2); hold on;
-plot(time, x_est(:,2), 'r-', 'LineWidth', 1.2);
+plot(time, X_Est(:,1), 'b-', 'LineWidth', 1.2); hold on;
+plot(time, X_Est(:,2), 'r-', 'LineWidth', 1.2);
 xlabel('Time [s]'); ylabel('Position [m]');
 legend('Est X', 'Est Y');
 title('Estimated Position over Time');
@@ -98,8 +97,9 @@ grid on;
 
 sgtitle('EKF Sensor Fusion Visualization');
 
-%Save data
-% save('Task2_5_Estimation.mat', 'x_est');
+%% === Save data ===
+X_Est=[X_Est(:,1:2),X_Est(:,5)];
+% save('Task2_3_Estimation.mat', 'X_Est');
 
 
 %% === EKF Main Function ===
