@@ -40,8 +40,6 @@ function compare_xyyaw_trajectories(est, gt)
     % Plot error metrics
     figure;
     ax = plot(mtrics, "absolute-translation");
-    maxError = mtrics.AbsoluteRMSE(1);  % 提取平移误差最大值
-    disp(['Max Error: ', num2str(maxError)]);
     disp('--- Debug Info: compareTrajectories executed successfully. ---');
 end
 

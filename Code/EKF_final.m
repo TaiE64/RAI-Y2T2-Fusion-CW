@@ -1,8 +1,8 @@
 clc; clear;
 
 %% === Load Data and Calibration Parameters ===
-load('calibration_params.mat');      % Contains gyro_bias, accel_bias, tof_bias
-load('C:\Users\33582\Desktop\OptimizationCW\trainingData\task2_3.mat');                 % Contains the 'out' structure
+load('calibration_params.mat');% Contains gyro_bias, accel_bias, tof_bias
+load('C:\Users\33582\Desktop\OptimizationCW\trainingData\task2_3.mat');% Contains the 'out' structure
 
 %% === Extract Sensor Data ===
 gyro  = squeeze(out.Sensor_GYRO.signals.values)';    % [N x 3]
