@@ -1,0 +1,312 @@
+function [X_Est, P_Est, GT] = myEKF(out)
+% MYEKF - Extended Kalman Filter for multi-sensor fusion
+%   [X_Est, P_Est, GT] = myEKF(out) processes the input struct `out`
+%   and returns:
+%     - X_Est: estimated states [x, y, vx, vy, yaw],
+%     - P_Est: final covariance matrix,
+%     - GT: ground truth structure.
+%
+%   The input `out` must include:
+%     - Sensor_GYRO, Sensor_ACCEL, Sensor_ToF1, Sensor_ToF2, Sensor_ToF3
+%     - GT_time, GT_position, GT_rotation
+%
+%   The calibration file calibration_params.mat must be in the same folder.
+%   MATLAB R2024b or newer supports the compareTrajectories function.
+
+    %% === Sensor Data Extraction ===
+    load('calibration_params.mat'); 
+    gyro  = squeeze(out.Sensor_GYRO.signals.values)';   % [N x 3]
+    accel = squeeze(out.Sensor_ACCEL.signals.values)';  % [N x 3]
+
+    tof1_data = squeeze(out.Sensor_ToF1.signals.values);
+    tof2_data = squeeze(out.Sensor_ToF2.signals.values);
+    tof3_data = squeeze(out.Sensor_ToF3.signals.values);
+    tof_data = [tof3_data(:,1), tof2_data(:,1), tof1_data(:,1)];
+
+    time    = out.GT_time.time;
+    GT_pos  = out.GT_position.signals.values(:,1:2);
+    GT_rot  = out.GT_rotation.signals.values;
+    GT_rot(1,:) = GT_rot(2,:);  % Fix NaN at first row
+
+    % Convert quaternion to Euler (ZYX) and extract Yaw
+    GT_q = quaternion(GT_rot);
+    eul  = eulerd(GT_q, 'ZYX', 'frame');
+    GT_yaw = deg2rad(eul(:,1)) + pi;
+    GT_yaw = unwrap(GT_yaw);
+
+    init_cor = GT_pos(1,:);
+    init_rot = GT_yaw(1);
+
+    %% === Bias Calibration ===
+    gyro_calibrated  = gyro - calibration_params.gyro_bias;
+    accel_calibrated = accel - calibration_params.accel_bias;
+    tof_calibrated   = tof_data - calibration_params.tof_bias;
+
+    %% === Smooth Y/Z Acceleration (Moving Average) ===
+    smooth_window = 5;
+    accel_calibrated(:,2) = movmean(accel_calibrated(:,2), smooth_window);
+    accel_calibrated(:,3) = movmean(accel_calibrated(:,3), smooth_window);
+
+    %% === Sudden Brake Detection ===
+    accel_dz = [0; diff(accel_calibrated(:,3))];
+    thresh = 0.65;
+    is_brake_jump = (abs(accel_dz) > thresh) & (accel_calibrated(:,3) < 0);
+
+    %% === Static Detection using Sliding Window ===
+    window_size = 8;
+    acc_thresh = 0.2;
+
+    %% === EKF Initialization ===
+    fs = 1 / mean(diff(time));
+    N = length(time);
+    x_est = zeros(N, 5);  % State: [x, y, vx, vy, yaw]
+    x_est(1,:) = [init_cor, 0, 0, init_rot];
+    P = diag([1e-6, 1e-6, 1e-6, 1e-6, 0]);
+    P_Est = cell(N, 1);
+    Q = diag([0.001, 0.001, 0.01, 0.001, 0]);
+    R = eye(3) * 1e3;
+
+    dt = 1 / fs;
+    a_w = zeros(N,2);
+    for i = 2:N
+        %% --- Prediction Step ---
+        a_y = accel_calibrated(i,2);
+        a_z = accel_calibrated(i,3);
+
+        if is_brake_jump(i)
+            scale = 1.3;
+        else
+            scale = 1.0;
+        end
+        a_b = [a_y, a_z * scale];
+
+        yaw = x_est(i-1,5);
+        % Transform body-frame acceleration to world-frame
+        R_yaw = [sin(yaw),  cos(yaw);
+                -cos(yaw),  sin(yaw)];
+        a_w(i,:) = (R_yaw * a_b')';
+
+        vx = x_est(i-1,3) + a_w(i,1) * dt;
+        vy = x_est(i-1,4) + a_w(i,2) * dt;
+
+        % Force zero velocity when stationary using sliding window
+        if i > window_size
+            a_recent = accel_calibrated(i-window_size+1:i, 2:3);
+            a_norm_mean = mean(vecnorm(a_recent, 2, 2));
+            if a_norm_mean < acc_thresh
+                vx = 0;
+                vy = 0;
+            end
+        end
+
+        x_pred = x_est(i-1,:);
+        x_pred(1) = x_pred(1) + vx * dt + 0.5 * a_w(i,1) * dt^2;
+        x_pred(2) = x_pred(2) + vy * dt + 0.5 * a_w(i,2) * dt^2;
+        x_pred(3) = vx;
+        x_pred(4) = vy;
+        x_pred(5) = x_pred(5) + gyro_calibrated(i,1) * dt;
+
+        F = eye(5); 
+        F(1,3) = dt; 
+        F(2,4) = dt;
+        P = F * P * F' + Q;
+
+        % Measurement Update
+        [z_pred, H] = measurementModel(x_pred);
+        z_meas = tof_calibrated(i,:)';
+        y_res = z_meas - z_pred;
+        S = H * P * H' + R;
+        K = P * H' / S;
+        x_est(i,:) = x_pred + (K * y_res)';  
+        % Keep yaw from integration (not corrected)
+        x_est(i,5) = x_pred(5); 
+        P = (eye(5) - K * H) * P;
+        P_Est{i-1} = P;
+    end
+
+    %% === Output Results ===
+    X_Est = [x_est(:,1:2),x_est(:,5)];
+    GT = [GT_pos, GT_yaw];
+
+    %% === Visualization ===
+    figure;
+
+    subplot(3,2,1);
+    plot(GT_pos(:,1), GT_pos(:,2), 'g--', 'LineWidth', 2); hold on;
+    plot(x_est(:,1), x_est(:,2), 'r-', 'LineWidth', 1.5);
+    legend('Ground Truth', 'EKF Estimate');
+    xlabel('X [m]'); ylabel('Y [m]');
+    title('Trajectory with EKF Fusion');
+    axis equal; grid on;
+
+    subplot(3,2,2);
+    plot(time, x_est(:,5), 'r-', 'LineWidth', 1.2); hold on;
+    plot(time, GT_yaw, 'b--', 'LineWidth', 1.2);
+    xlabel('Time [s]'); ylabel('Yaw [rad]');
+    legend('Estimated', 'Ground Truth');
+    title('Yaw Comparison over Time');
+    grid on;
+
+    subplot(3,2,3);
+    plot(time, x_est(:,3), 'b-', 'LineWidth', 1.2);
+    xlabel('Time [s]'); ylabel('X-axis Velocity [m/s]');
+    title('X-axis Velocity from EKF');
+    grid on;
+
+    subplot(3,2,4);
+    plot(time, x_est(:,4), 'r-', 'LineWidth', 1.5);
+    xlabel('Time [s]'); ylabel('Y-axis Velocity [m/s]');
+    title('Y-axis Velocity from EKF');
+    grid on;
+
+    subplot(3,2,5);
+    plot(time, x_est(:,1), 'b-', 'LineWidth', 1.2); hold on;
+    plot(time, x_est(:,2), 'r-', 'LineWidth', 1.2);
+    xlabel('Time [s]'); ylabel('Position [m]');
+    legend('Est X', 'Est Y');
+    title('Estimated Position over Time');
+    grid on;
+
+    subplot(3,2,6);
+    plot(time, GT_pos(:,1), 'b-', 'LineWidth', 1.2); hold on;
+    plot(time, GT_pos(:,2), 'r-', 'LineWidth', 1.2);
+    xlabel('Time [s]'); ylabel('Position [m]');
+    legend('GT X', 'GT Y');
+    title('Ground Truth Position over Time');
+    grid on;
+
+    sgtitle('EKF Sensor Fusion Visualization');
+
+    %% === Trajectory Comparison ===
+    compare_xyyaw_trajectories(X_Est, GT);
+end
+
+
+%% === Measurement Model Function ===
+function [z_pred, H] = measurementModel(x)
+    % Numerically compute the predicted ToF values and Jacobian
+    % Input:
+    %   x: [x, y, vx, vy, yaw]
+    % Output:
+    %   z_pred: [tof_right; tof_front; tof_left]
+    %   H: 3x5 Jacobian matrix
+
+    sensor_angles = [pi/2, 0, -pi/2];  % Right, Front, Left
+    wall_vals = [1.25, -1.15, 1.25, -1.15];  % vertical and horizontal walls
+
+    z_pred = zeros(3,1);
+    H = zeros(3,5);
+    delta = 1e-5;
+    idx = [1, 2, 5];  % Derivatives w.r.t. x, y, yaw
+
+    for i = 1:3
+        theta = x(5);
+        beta = theta + sensor_angles(i);
+        pos = x(1:2);
+
+        % Original predicted observation
+        t_candidates = [];
+        if abs(cos(beta)) > 1e-5
+            for c = wall_vals(1:2)
+                t = (c - pos(1)) / cos(beta);
+                if t > 0
+                    t_candidates(end+1) = t;
+                end
+            end
+        end
+        if abs(sin(beta)) > 1e-5
+            for c = wall_vals(3:4)
+                t = (c - pos(2)) / sin(beta);
+                if t > 0
+                    t_candidates(end+1) = t;
+                end
+            end
+        end
+
+        if isempty(t_candidates)
+            z = inf;
+        else
+            z = min(t_candidates);
+        end
+        z_pred(i) = z;
+
+        % Numerical Jacobian
+        grad = zeros(1,3);
+        for j = 1:3
+            x_pert = x;
+            x_pert(idx(j)) = x_pert(idx(j)) + delta;
+            pos_p = x_pert(1:2);
+            beta_p = x_pert(5) + sensor_angles(i);
+
+            t_p = [];
+            if abs(cos(beta_p)) > 1e-5
+                for c = wall_vals(1:2)
+                    tp = (c - pos_p(1)) / cos(beta_p);
+                    if tp > 0
+                        t_p(end+1) = tp;
+                    end
+                end
+            end
+            if abs(sin(beta_p)) > 1e-5
+                for c = wall_vals(3:4)
+                    tp = (c - pos_p(2)) / sin(beta_p);
+                    if tp > 0
+                        t_p(end+1) = tp;
+                    end
+                end
+            end
+
+            if isempty(t_p)
+                zp = inf;
+            else
+                zp = min(t_p);
+            end
+            grad(j) = (zp - z) / delta;
+        end
+
+        H(i, idx) = grad;
+    end
+end
+
+%% === Compare function ===
+function compare_xyyaw_trajectories(est, gt)
+    % est and gt should be N×3 matrices: [x, y, yaw] (unit: meter + rad)
+    assert(size(est,2) == 3 && size(gt,2) == 3, ...
+        'Inputs must be N×3 matrices of [x, y, yaw]');
+
+    % Convert to rigidtform3d trajectories
+    estTraj = xyyaw_to_rigid(est);
+    gtTraj = xyyaw_to_rigid(gt);
+
+    % Compute trajectory difference
+    mtrics = compareTrajectories(gtTraj, estTraj);
+    disp(['Absolute RMSE for key frame location (m): ', num2str(mtrics.AbsoluteRMSE(2))]);
+
+    % Plot error metrics
+    figure;
+    ax = plot(mtrics, "absolute-translation");
+    disp('--- Debug Info: compareTrajectories executed successfully. ---');
+end
+
+%% === Convert [x, y, yaw] to rigidtform3d array ===
+function traj = xyyaw_to_rigid(data)
+    numFrames = size(data, 1);
+    traj = rigidtform3d.empty(numFrames, 0);
+
+    for i = 1:numFrames
+        x = data(i,1);
+        y = data(i,2);
+        yaw = data(i,3);  % yaw in radians
+
+        % Rotation matrix around Z-axis
+        R = [cos(yaw), -sin(yaw), 0;
+             sin(yaw),  cos(yaw), 0;
+             0, 0, 1];
+        
+        % Translation vector
+        t = [x, y, 0];
+
+        % Construct rigid transformation
+        traj(i) = rigidtform3d(R, t);
+    end
+end
